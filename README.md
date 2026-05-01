@@ -2,16 +2,18 @@
 
 在 Mac 上为本机队列中的 CIA / TIK 文件启动小型 HTTP 服务，并通过局域网把安装链接推送给多台已配置 IP 与端口的 **FBI（Remote install）**，从而在 3DS 上远程安装。
 
+<div style="display:flex;gap:10px;">
+  <img src="./snapshot/3.png" style="width:730px;" />
+  <img src="./snapshot/2.png" style="width:375px;" />
+  <img src="./snapshot/1.png" style="width:375px;" />
+</div>
+
 ## 功能概览
 
 - **控制台列表**：手动添加或编辑 3DS 的 IP 与端口（与 FBI 远程安装里显示的一致）；可选使用局域网 ARP 扫描辅助发现主机。
 - **任务队列**：添加本地 `.cia` / `.tik`、文件夹拖入（会枚举其中的 CIA/TIK）、或通过 **http(s)** 链接添加直链；队列内显示序号、进度（传输时）、体积与协议标识。
 - **开始 / 停止服务**：开始后在 Mac 上监听 HTTP，并向列表中的控制台下发 FBI 可用的安装 URL；活动日志区域展示状态与传输相关输出。
 - **界面**：SwiftUI，适配 macOS 的玻璃风格窗口与分割视图。
-
-![预览](./snapshot/3.png "预览")
-![等待传输](./snapshot/2.png "等待传输")
-![传输中](./snapshot/1.png "传输中")
 
 ## 系统要求
 
@@ -81,3 +83,5 @@ git push origin v1.0.0
 ## 免责声明
 
 本工具仅用于在你拥有合法权利的软件副本上进行安装与测试。请遵守当地法律与任天堂及软件许可条款。
+
+![Visited By](https://count.getloli.com/get/@moneko-o?theme=rule34)
