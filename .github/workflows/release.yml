@@ -1,0 +1,78 @@
+# Build Release .app, package DMG, attach to GitHub Release when you push a version tag (e.g. v1.0.0).
+#
+# Requires a runner whose Xcode SDK satisfies the project (currently MACOSX_DEPLOYMENT_TARGET = 26).
+# If hosted runners lag behind, set repository variable MACOSX_DEPLOYMENT_TARGET_CI (e.g. 15.0) or use a self-hosted runner.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-dmg:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Release
+        env:
+          DERIVED: ${{ github.workspace }}/.derived-ci
+          # Optional repo variable: override deployment target when CI SDK is older than project default.
+          MACOSX_DEPLOYMENT_TARGET_CI: ${{ vars.MACOSX_DEPLOYMENT_TARGET_CI }}
+        run: |
+          set -eo pipefail
+          echo "DERIVED_DATA_PATH=$DERIVED" >> "$GITHUB_ENV"
+
+          EXTRA_ARGS=()
+          if [[ -n "${MACOSX_DEPLOYMENT_TARGET_CI:-}" ]]; then
+            EXTRA_ARGS+=(MACOSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET_CI")
+          fi
+
+          xcodebuild \
+            -project "3DS FBI Server.xcodeproj" \
+            -scheme "3DS FBI Server" \
+            -configuration Release \
+            -derivedDataPath "$DERIVED" \
+            -destination 'generic/platform=macOS' \
+            CODE_SIGN_IDENTITY="-" \
+            "${EXTRA_ARGS[@]}" \
+            build
+
+      - name: Package DMG
+        run: |
+          set -eo pipefail
+          APP="${DERIVED_DATA_PATH}/Build/Products/Release/3DS FBI Server.app"
+          if [[ ! -d "$APP" ]]; then
+            echo "Built app not found at: $APP"
+            find "${DERIVED_DATA_PATH}" -name '*.app' -maxdepth 6 2>/dev/null || true
+            exit 1
+          fi
+
+          STAGING=$(mktemp -d)
+          cp -R "$APP" "$STAGING/"
+          ln -sf /Applications "$STAGING/Applications"
+
+          DMG_NAME="3DS-FBI-Server-${{ github.ref_name }}.dmg"
+          hdiutil create \
+            -volname "3DS FBI Server" \
+            -srcfolder "$STAGING" \
+            -ov \
+            -format UDZO \
+            "$DMG_NAME"
+
+          rm -rf "$STAGING"
+          ls -la "$DMG_NAME"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.dmg'
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
