@@ -10,14 +10,19 @@ permissions:
 
 jobs:
   build-dmg:
+    name: DMG (${{ matrix.arch }})
     runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x86_64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build Release
+      - name: Build Release (${{ matrix.arch }})
         env:
-          DERIVED: ${{ github.workspace }}/.derived-ci
+          DERIVED: ${{ github.workspace }}/.derived-${{ matrix.arch }}
           MACOSX_DEPLOYMENT_TARGET_CI: ${{ vars.MACOSX_DEPLOYMENT_TARGET_CI }}
           DEVELOPER_DIR_CI: ${{ vars.DEVELOPER_DIR_CI }}
         run: |
@@ -40,17 +45,21 @@ jobs:
             -configuration Release \
             -derivedDataPath "$DERIVED" \
             -destination 'generic/platform=macOS' \
+            ARCHS="${{ matrix.arch }}" \
+            ONLY_ACTIVE_ARCH=NO \
             CODE_SIGN_IDENTITY="-" \
             "${EXTRA_ARGS[@]}" \
             build
 
       - name: Package DMG
+        env:
+          DMG_NAME: 3DS-FBI-Server-${{ github.ref_name }}-${{ matrix.arch }}.dmg
         run: |
           set -eo pipefail
           APP="${DERIVED_DATA_PATH}/Build/Products/Release/3DS FBI Server.app"
           if [[ ! -d "$APP" ]]; then
             echo "Built app not found at: $APP"
-            find "${DERIVED_DATA_PATH}" -name '*.app' -maxdepth 6 2>/dev/null || true
+            find "${DERIVED_DATA_PATH}" -name '*.app' -maxdepth 8 2>/dev/null || true
             exit 1
           fi
 
@@ -58,7 +67,6 @@ jobs:
           cp -R "$APP" "$STAGING/"
           ln -sf /Applications "$STAGING/Applications"
 
-          DMG_NAME="3DS-FBI-Server-${{ github.ref_name }}.dmg"
           hdiutil create \
             -volname "3DS FBI Server" \
             -srcfolder "$STAGING" \
@@ -69,10 +77,29 @@ jobs:
           rm -rf "$STAGING"
           ls -la "$DMG_NAME"
 
-      - name: Publish GitHub Release
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmg-${{ matrix.arch }}
+          path: '*.dmg'
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-dmg
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download DMG artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dmg-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: '*.dmg'
+          files: release-assets/*.dmg
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
