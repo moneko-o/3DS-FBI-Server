@@ -45,6 +45,81 @@ struct ConsoleManagerItem: Identifiable, Hashable, Sendable {
     }
 }
 
+/// Helpers for `/usr/sbin/arp -a` parsing (file-level `enum` avoids `Self` in stored-property initializers on classes).
+private enum ARPConsoleDiscovery {
+    /// Nintendo Wi‑Fi OUI prefixes (first 3 octets). Compared after normalizing each octet (strip redundant leading zeros).
+    static let nintendoOUIRawPrefixes: [String] = [
+        "e8:4e:ce", "e0:e7:51", "e0:c:7f", "d8:6b:f7", "cc:fb:65", "cc:9e:0", "b8:ae:6e", "a4:c0:e1", "a4:5c:27",
+        "9c:e6:35", "98:b6:e9", "8c:cd:e8", "8c:56:c5", "7c:bb:8a", "78:a2:a0", "58:bd:a3", "40:f4:7", "40:d2:8a",
+        "34:af:2c", "2c:10:c1", "18:2a:7b", "0:27:9", "0:26:59", "0:25:a0", "0:24:f3", "0:24:44", "0:24:1e", "0:23:cc",
+        "0:23:31", "0:22:d7", "0:22:aa", "0:22:4c", "0:21:bd", "0:21:47", "0:1f:c5", "0:1f:32", "0:1e:a9", "0:1e:35",
+        "0:1d:bc", "0:1c:be", "0:1b:ea", "0:1b:7a", "0:1a:e9", "0:19:fd", "0:19:1d", "0:17:ab", "0:16:56", "0:9:bf",
+    ]
+
+    static let nintendoOUINormalized: Set<String> = {
+        Set(nintendoOUIRawPrefixes.map { normalizeThreeOctetOUI($0) })
+    }()
+
+    /// Maps `aa:bb:cc:…` or `aa:bb:cc` to a canonical `aa:bb:cc` string for OUI lookup (handles `00` vs `0`).
+    static func normalizeThreeOctetOUI(_ macOrPrefix: String) -> String {
+        let parts = macOrPrefix.split(separator: ":").map(String.init)
+        guard parts.count >= 3 else { return macOrPrefix.lowercased() }
+        let nums = parts.prefix(3).compactMap { Int($0, radix: 16) }
+        guard nums.count == 3 else { return macOrPrefix.lowercased() }
+        return nums.map { String(format: "%x", $0) }.joined(separator: ":")
+    }
+
+    static func shouldSkipDiscoveredIPv4(_ ip: String) -> Bool {
+        let octets = ip.split(separator: ".").compactMap { Int($0) }
+        guard octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }) else { return true }
+        if octets[0] >= 224, octets[0] <= 239 { return true }
+        if octets == [255, 255, 255, 255] { return true }
+        return false
+    }
+
+    /// Parses `arp -a` **line-by-line** so IP and MAC stay paired (global regex lists mis-align on `(incomplete)` rows).
+    static func collectNintendoLANIPs() -> [String] {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/sbin/arp")
+        task.arguments = ["-a"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            return []
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else { return [] }
+
+        guard let lineRegex = try? NSRegularExpression(
+            pattern: #"^\S*\s+\((\d{1,3}(?:\.\d{1,3}){3})\)\s+at\s+([0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5})\s+on"#
+        ) else {
+            return []
+        }
+
+        var ips: [String] = []
+        var seen = Set<String>()
+        for line in output.split(whereSeparator: \.isNewline) {
+            let s = String(line)
+            if s.contains("(incomplete)") { continue }
+            let ns = s as NSString
+            let range = NSRange(location: 0, length: ns.length)
+            guard let m = lineRegex.firstMatch(in: s, range: range), m.numberOfRanges >= 3 else { continue }
+            let ip = ns.substring(with: m.range(at: 1))
+            let mac = ns.substring(with: m.range(at: 2))
+            guard !shouldSkipDiscoveredIPv4(ip) else { continue }
+            let oui = normalizeThreeOctetOUI(mac)
+            guard nintendoOUINormalized.contains(oui) else { continue }
+            if seen.insert(ConsoleManagerItem.normalizedIPAddress(ip)).inserted {
+                ips.append(ip)
+            }
+        }
+        return ips
+    }
+}
+
 @MainActor
 final class VKMConsoleManager: NSObject, ObservableObject {
     private final class SocketBatchFinish: @unchecked Sendable {
@@ -112,7 +187,7 @@ final class VKMConsoleManager: NSObject, ObservableObject {
     /// Runs `/usr/sbin/arp` off the main actor; results merge on `MainActor`.
     func enqueueLANARPScan() {
         DispatchQueue.global(qos: .utility).async {
-            let ips = Self.collectNintendoLANIPs()
+            let ips = ARPConsoleDiscovery.collectNintendoLANIPs()
             Task { @MainActor [weak self] in
                 self?.ingestLANARPCandidates(ips)
             }
@@ -130,50 +205,6 @@ final class VKMConsoleManager: NSObject, ObservableObject {
         }
         if next != dataArray {
             dataArray = next
-        }
-    }
-
-    nonisolated private static func collectNintendoLANIPs() -> [String] {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/arp")
-        task.arguments = ["-a"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        do {
-            try task.run()
-            task.waitUntilExit()
-        } catch {
-            return []
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else { return [] }
-
-        let ipPattern = "\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b"
-        let macPattern = " ([0-9a-fA-F]{1,2}:){2}([0-9a-fA-F]{1,2})"
-        let nintendoMACs = ["e8:4e:ce", "e0:e7:51", "e0:c:7f", "d8:6b:f7", "cc:fb:65", "cc:9e:0", "b8:ae:6e", "a4:c0:e1", "a4:5c:27", "9c:e6:35", "98:b6:e9", "8c:cd:e8", "8c:56:c5", "7c:bb:8a", "78:a2:a0", "58:bd:a3", "40:f4:7", "40:d2:8a", "34:af:2c", "2c:10:c1", "18:2a:7b", "0:27:9", "0:26:59", "0:25:a0", "0:24:f3", "0:24:44", "0:24:1e", "0:23:cc", "0:23:31", "0:22:d7", "0:22:aa", "0:22:4c", "0:21:bd", "0:21:47", "0:1f:c5", "0:1f:32", "0:1e:a9", "0:1e:35", "0:1d:bc", "0:1c:be", "0:1b:ea", "0:1b:7a", "0:1a:e9", "0:19:fd", "0:19:1d", "0:17:ab", "0:16:56", "0:9:bf"]
-
-        let ipMatches = Self.regexMatches(for: ipPattern, in: output)
-        let macMatches = Self.regexMatches(for: macPattern, in: output)
-        var ips: [String] = []
-        for (index, macMatch) in macMatches.enumerated() {
-            var cleanedMAC = macMatch
-            cleanedMAC.remove(at: cleanedMAC.startIndex)
-            if nintendoMACs.contains(cleanedMAC), index < ipMatches.count {
-                ips.append(ipMatches[index])
-            }
-        }
-        return ips
-    }
-
-    nonisolated private static func regexMatches(for pattern: String, in text: String) -> [String] {
-        do {
-            let regex = try NSRegularExpression(pattern: pattern)
-            let nsString = text as NSString
-            let results = regex.matches(in: text, range: NSRange(location: 0, length: nsString.length))
-            return results.map { nsString.substring(with: $0.range) }
-        } catch {
-            print("invalid regex: \(error.localizedDescription)")
-            return []
         }
     }
 
